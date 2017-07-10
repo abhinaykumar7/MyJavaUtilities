@@ -1,0 +1,29 @@
+<project name="SLE" default="all" basedir=".">	
+	<property file="./build.properties" />	
+	<property name="version" value="3.6.0.8"/>	
+	<path id="libjars">
+		<fileset dir="${lib}">
+			<include name="*.jar"/>
+		</fileset>
+	</path>
+	<taskdef name="sle-version" classname="com.hutchison3g.build.VersionTask" classpathref="libjars"/>	  		
+	<target name="compile">
+		<javac destdir="." debug="on" optimize="off" deprecation ="off">
+			<src path="."/>
+			<classpath refid="libjars" />
+		</javac>
+	</target>	
+	<target name="run" depends="compile">
+		<java classname="StandAloneProgram">	         		 	 
+			<classpath>
+				<fileset dir="${lib}">
+					<include name="*.jar"/>
+					<include name="*.zip"/>
+				</fileset>
+				<dirset dir="." />
+			</classpath>				
+		</java>	
+	</target>	
+	<target name="all" depends="compile">
+	</target>	
+</project>
