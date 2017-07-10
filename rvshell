@@ -1,0 +1,1348 @@
+import java.util.*;
+import java.lang.*;
+import java.io.*;
+import tibrv.*;
+
+public class rvsh implements TibrvMsgCallback,Runnable,TibrvCmReviewCallback,TibrvFtMemberCallback
+{
+  String daemon;
+  String service;
+  String network;
+  InputStream is;
+  Thread stdin;
+  TibrvRvdTransport transport=null;
+  TibrvRvdTransport default_transport=null;
+  Hashtable listeners;
+  String field_separator="%%";
+  Hashtable v_str;
+  Hashtable v_typ;
+  TreeMap v_ord;
+  int timeout=30;
+  int dq_worker_weight=1;
+  int dq_worker_tasks=1;
+  int dq_scheduler_weight=1;
+  int dq_scheduler_heartbeat_int=2;
+  int dq_scheduler_activation_int=7;
+  String dqname="";
+  String cmname="";
+  Hashtable dqt;
+  Hashtable cmt;
+  Hashtable tsp;
+  String cmledger=null;
+  int cm_timeout=0;
+  String reply_to="";
+  int field_c=0;
+  int display_format=0;
+  long msg_size=0;
+  TibrvFtMember ftm=null;
+  long expire_at=0;
+
+  public rvsh(String args[])
+  {
+    if(args.length!=3)
+    {
+      System.err.println("Usage: rvsh daemon service network");
+      System.exit(1);
+    }
+
+    daemon=args[0];
+    service=args[1];
+    network=args[2];
+    is=System.in;
+    listeners=new Hashtable();
+    v_str=new Hashtable();
+    v_typ=new Hashtable();
+    v_ord=new TreeMap();
+    dqt=new Hashtable();
+    cmt=new Hashtable();
+    tsp=new Hashtable();
+
+    try
+    {
+      Tibrv.open(Tibrv.IMPL_NATIVE);
+    }
+    catch (TibrvException e)
+    {
+      System.err.println("Error: Failed to open Tibrv in native implementation");
+      e.printStackTrace();
+      System.exit(1);
+    }
+
+    try
+    {
+      transport=new TibrvRvdTransport(service,network,daemon);
+      default_transport=transport;
+      default_transport.setDescription("RVSH Default");
+    }
+    catch (TibrvException e)
+    {
+      System.err.println("Error: Failed to create TibrvRvdTransport");
+      e.printStackTrace();
+      System.exit(1);
+    }
+
+    try
+    {
+      new TibrvDispatcher("DISP",Tibrv.defaultQueue());
+    }
+    catch (Exception e)
+    {
+      System.err.println("Error: Failed initialise TIB/RV dispatcher");
+      e.printStackTrace();
+      System.exit(1);
+    }
+
+    stdin=new Thread(this);
+    stdin.start();
+
+    System.out.println("READY");
+
+    while(true)
+    {
+      try
+      {
+        Thread.currentThread().sleep(1000);
+
+        if(expire_at>0)
+        {
+          if(System.currentTimeMillis()>expire_at)
+          {
+            System.out.println("Warning: No keepalives received from controlling process - exiting");
+//          slp(5);
+            System.exit(0);
+          }
+        }
+      }
+      catch(Exception e)
+      {
+      }
+    }
+  }
+
+  void cmd(String s)
+  {
+    if(s.startsWith("SUBSCRIBE_TO "))
+    {
+      subscribe_to(s.substring(13,s.length()).trim());
+    }
+    else if(s.startsWith("CANCEL_SUBSCRIPTION "))
+    {
+      cancel(s.substring(20,s.length()).trim());
+    }
+    else if(s.startsWith("STRING_FIELD "))
+    {
+      storefield(s.substring(13,s.length()).trim(),TibrvMsg.STRING);
+    }
+    else if(s.startsWith("I8_FIELD "))
+    {
+      storefield(s.substring(9,s.length()).trim(),TibrvMsg.I8);
+    }
+    else if(s.startsWith("I16_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.I16);
+    }
+    else if(s.startsWith("I32_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.I32);
+    }
+    else if(s.startsWith("I64_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.I64);
+    }
+    else if(s.startsWith("F32_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.F32);
+    }
+    else if(s.startsWith("F64_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.F64);
+    }
+    else if(s.startsWith("U8_FIELD "))
+    {
+      storefield(s.substring(9,s.length()).trim(),TibrvMsg.U8);
+    }
+    else if(s.startsWith("U16_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.U16);
+    }
+    else if(s.startsWith("U32_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.U32);
+    }
+    else if(s.startsWith("U64_FIELD "))
+    {
+      storefield(s.substring(10,s.length()).trim(),TibrvMsg.U64);
+    }
+    else if(s.startsWith("BOOL_FIELD "))
+    {
+      storefield(s.substring(11,s.length()).trim(),TibrvMsg.BOOL);
+    }
+    else if(s.startsWith("DATETIME_FIELD "))
+    {
+      storefield(s.substring(15,s.length()).trim(),TibrvMsg.DATETIME);
+    }
+    else if(s.startsWith("OPAQUE_FIELD "))
+    {
+      storefield(s.substring(13,s.length()).trim(),TibrvMsg.OPAQUE);
+    }
+    else if(s.startsWith("CLEAR_FIELDS"))
+    {
+      clear_fields();
+    }
+    else if(s.startsWith("SHOW_FIELDS"))
+    {
+      show_fields();
+    }
+    else if(s.startsWith("LIST_FIELDS"))
+    {
+      show_fields();
+    }
+    else if(s.startsWith("PUBLISH_TO "))
+    {
+      publish_to(s.substring(11,s.length()).trim(),0);
+    }
+    else if(s.startsWith("REPLY_TO "))
+    {
+      reply_to=s.substring(9,s.length()).trim();
+      System.out.println("Reply subject set to "+reply_to);
+    }
+    else if(s.startsWith("REQUEST_TO "))
+    {
+      publish_to(s.substring(11,s.length()).trim(),1);
+    }
+    else if(s.startsWith("CREATE_INBOX"))
+    {
+      create_inbox();
+    }
+    else if(s.startsWith("RR_TIMEOUT "))
+    {
+      timeout=Integer.parseInt(s.substring(11,s.length()).trim());
+      System.out.println("Request/reply timeout set to "+timeout);
+    }
+    else if(s.startsWith("DQ_WORKER_WEIGHT "))
+    {
+      dq_worker_weight=Integer.parseInt(s.substring(17,s.length()).trim());
+      System.out.println("DQ worker weight set to "+dq_worker_weight);
+    }
+    else if(s.startsWith("DQ_WORKER_TASKS "))
+    {
+      dq_worker_tasks=Integer.parseInt(s.substring(16,s.length()).trim());
+      System.out.println("DQ worker tasks set to "+dq_worker_tasks);
+    }
+    else if(s.startsWith("DQ_SCHEDULER_WEIGHT "))
+    {
+      dq_scheduler_weight=Integer.parseInt(s.substring(20,s.length()).trim());
+      System.out.println("DQ scheduler weight set to "+dq_scheduler_weight);
+    }
+    else if(s.startsWith("DQ_SCHEDULER_HEARTBEAT_INT "))
+    {
+      dq_scheduler_heartbeat_int=Integer.parseInt(s.substring(27,s.length()).trim());
+      System.out.println("DQ scheduler heartbeat interval set to "+dq_scheduler_heartbeat_int);
+    }
+    else if(s.startsWith("DQ_SCHEDULER_ACTIVATION_INT "))
+    {
+      dq_scheduler_activation_int=Integer.parseInt(s.substring(28,s.length()).trim());
+      System.out.println("DQ scheduler activation interval set to "+dq_scheduler_activation_int);
+    }
+    else if(s.startsWith("DQ_TASK_COMPLETE_TIME "))
+    {
+      dq_task_complete_time(Double.parseDouble(s.substring(22,s.length()).trim()));
+    }
+    else if(s.startsWith("CM_LEDGER "))
+    {
+      cmledger=s.substring(10,s.length()).trim();
+      System.out.println("CM ledger file set to \""+cmledger+"\"");
+    }
+    else if(s.startsWith("REVIEW_CM_LEDGER "))
+    {
+      reviewcml(s.substring(17,s.length()).trim());
+    }
+    else if(s.startsWith("SET_CM_TIME_LIMIT "))
+    {
+      setcmtime(s.substring(18,s.length()).trim());
+    }
+    else if(s.startsWith("LIST_SUBSCRIPTIONS"))
+    {
+      list_subs();
+    }
+    else if(s.startsWith("LIST_DQ_TRANSPORTS"))
+    {
+      list_dqts();
+    }
+    else if(s.startsWith("LIST_CM_TRANSPORTS"))
+    {
+      list_cmts();
+    }
+    else if(s.startsWith("SHOW_DQ_TRANSPORTS"))
+    {
+      list_dqts();
+    }
+    else if(s.startsWith("SHOW_CM_TRANSPORTS"))
+    {
+      list_cmts();
+    }
+    else if(s.startsWith("SHOW_TIME"))
+    {
+      System.out.println("Current time is "+System.currentTimeMillis());
+    }
+    else if(s.startsWith("QUIT"))
+    {
+      System.out.println("Exiting");
+//    slp(5);
+      System.exit(0);
+    }
+    else if(s.startsWith("EXIT"))
+    {
+      System.out.println("Exiting");
+//    slp(5);
+      System.exit(0);
+    }
+    else if(s.startsWith("BYE"))
+    {
+      System.out.println("Exiting");
+//    slp(5);
+      System.exit(0);
+    }
+    else if(s.startsWith("FIN"))
+    {
+      System.out.println("Sortir");
+//    slp(5);
+      System.exit(0);
+    }
+    else if(s.startsWith("RINUNCIATO"))
+    {
+      System.out.println("Rimuovere");
+//    slp(5);
+      System.exit(0);
+    }
+    else if(s.startsWith("PA"))
+    {
+      System.out.println("Lesirea");
+//    slp(5);
+      System.exit(0);
+    }
+    else if(s.startsWith("USE_FT_TRANSPORT "))
+    {
+      init_ft(s.substring(17,s.length()).trim());
+    }
+    else if(s.startsWith("USE_DQ_TRANSPORT "))
+    {
+      use_dq(s.substring(17,s.length()).trim());
+    }
+    else if(s.startsWith("USE_CM_TRANSPORT "))
+    {
+      use_cm(s.substring(17,s.length()).trim());
+    }
+    else if(s.startsWith("CLOSE_DQ_TRANSPORT "))
+    {
+      close_dq(s.substring(19,s.length()).trim());
+    }
+    else if(s.startsWith("CLOSE_CM_TRANSPORT "))
+    {
+      close_cm(s.substring(19,s.length()).trim());
+    }
+    else if(s.startsWith("USE_RV_TRANSPORT"))
+    {
+      dqname="";
+      cmledger=null;
+      cmname="";
+      System.out.println("Using RV transport");
+    }
+    else if(s.startsWith("SELECT_DAEMON "))
+    {
+      daemon=s.substring(14,s.length()).trim();
+      System.out.println("Using RV daemon \""+daemon+"\"");
+    }
+    else if(s.startsWith("SELECT_SERVICE "))
+    {
+      service=s.substring(15,s.length()).trim();
+      System.out.println("Using RV service \""+service+"\"");
+    }
+    else if(s.startsWith("SELECT_NETWORK "))
+    {
+      network=s.substring(15,s.length()).trim();
+      System.out.println("Using RV network \""+network+"\"");
+    }
+    else if(s.startsWith("SELECT_TRANSPORT "))
+    {
+      select_transport(s.substring(17,s.length()).trim());
+    }
+    else if(s.startsWith("FORMAT_DEFAULT"))
+    {
+      display_format=0;
+    }
+    else if(s.startsWith("FORMAT_RELOAD"))
+    {
+      display_format=1;
+    }
+    else if(s.startsWith("HELP"))
+    {
+      System.out.println("  SUBSCRIBE_TO <subject>               - Subscribe");
+      System.out.println("  CANCEL_SUBSCRIPTION <subject>        - Cancel a subscription");
+      System.out.println("  LIST_SUBSCRIPTIONS                   - List open subscriptions");
+      System.out.println("");
+      System.out.println("  SELECT_DAEMON <daemon param>         - Use a RV daemon parameter");
+      System.out.println("  SELECT_SERVICE <service param>       - Use a RV service parameter");
+      System.out.println("  SELECT_NETWORK <network param>       - Use a RV network parameter");
+      System.out.println("  SELECT_TRANSPORT <transport name>    - Use a new RV transport");
+      System.out.println("");
+      System.out.println("  USE_RV_TRANSPORT                     - Use a non-DQ transport (default)");
+      System.out.println("");
+      System.out.println("  USE_DQ_TRANSPORT <dq name>           - Create and use a DQ transport");
+      System.out.println("  CLOSE_DQ_TRANSPORT <dq name>         - Destroy a DQ transport");
+      System.out.println("  LIST_DQ_TRANSPORTS                   - List DQ transports");
+      System.out.println("  SHOW_DQ_TRANSPORTS                   - List DQ transports");
+      System.out.println("  DQ_SCHEDULER_WEIGHT <value>          - Sets DQ scheduler weight");
+      System.out.println("  DQ_SCHEDULER_HEARTBEAT_INT <value>   - Sets DQ scheduler heartbeat interval");
+      System.out.println("  DQ_SCHEDULER_ACTIVATION_INT <value>  - Sets DQ scheduler activation interval");
+      System.out.println("  DQ_WORKER_WEIGHT <value>             - Sets DQ worker weight");
+      System.out.println("  DQ_WORKER_TASKS <value>              - Sets DQ worker max tasks");
+      System.out.println("  DQ_TASK_COMPLETE_TIME <value>        - Sets DQ worker task complete time");
+      System.out.println("");
+      System.out.println("  USE_FT_TRANSPORT <ft name>           - Create an FT transport (uses weight/hb/act");
+      System.out.println("                                         set by DQ_SCHEDULER_* commands)");
+      System.out.println("");
+      System.out.println("  USE_CM_TRANSPORT <cm name>           - Create and use a CM transport");
+      System.out.println("  CLOSE_CM_TRANSPORT <cm name>         - Destroy a CM transport");
+      System.out.println("  LIST_CM_TRANSPORTS                   - List CM transports");
+      System.out.println("  SHOW_CM_TRANSPORTS                   - List CM transports");
+      System.out.println("  CM_LEDGER <file name>                - Use this file as a CM ledger");
+      System.out.println("  SET_CM_TIME_LIMIT <time>             - Set the expiry time for CM messages");
+      System.out.println("  REVIEW_CM_LEDGER <subject>           - Check the CM ledger for stored");
+      System.out.println("                                         subjects");
+      System.out.println("");
+      System.out.println("  STRING_FIELD <name> <value>          - Create a string field");
+      System.out.println("  BOOL_FIELD <name> <value>            - Create a boolean field");
+      System.out.println("  DATETIME_FIELD <name> <value>        - Create a datetime field - <value> is utime in ms");
+      System.out.println("  DATETIME_FIELD <name> NOW            - Create a datetime field with current time");
+      System.out.println("  OPAQUE_FIELD <name> <bytestream>     - Create an opaque field");
+      System.out.println("  I8_FIELD <name> <value>              - Create a signed byte field");
+      System.out.println("  I16_FIELD <name> <value>             - Create a signed short int field");
+      System.out.println("  I32_FIELD <name> <value>             - Create a signed int field");
+      System.out.println("  I64_FIELD <name> <value>             - Create a signed long int field");
+      System.out.println("  U8_FIELD <name> <value>              - Create a unsigned byte field");
+      System.out.println("  U16_FIELD <name> <value>             - Create a unsigned short int field");
+      System.out.println("  U32_FIELD <name> <value>             - Create a unsigned int field");
+      System.out.println("  U64_FIELD <name> <value>             - Create a unsigned long int field");
+      System.out.println("  F32_FIELD <name> <value>             - Create a float field");
+      System.out.println("  F64_FIELD <name> <value>             - Create a double field");
+      System.out.println("  SHOW_FIELDS                          - Show all fields & values");
+      System.out.println("  LIST_FIELDS                          - Show all fields & values");
+      System.out.println("  CLEAR_FIELDS                         - Clear all fields & values");
+      System.out.println("");
+      System.out.println("  PUBLISH_TO <subject>                 - Publish fields to a subject");
+      System.out.println("  REPLY_TO <subject>                   - Set reply subject");
+      System.out.println("  RR_TIMEOUT <value>                   - Set the request/reply timeout");
+      System.out.println("  CREATE_INBOX                         - Return an inbox name");
+      System.out.println("  REQUEST_TO <subject>                 - Publish fields to a subject");
+      System.out.println("                                         and wait for a reply");
+      System.out.println("");
+      System.out.println("  FORMAT_RELOAD                        - Switch display format to style");
+      System.out.println("                                         suitable for re-loading");
+      System.out.println("  FORMAT_DEFAULT                       - Switch display format to default");
+      System.out.println("                                         suitable for re-loading");
+      System.out.println("  KEEP_ALIVE <ms>                      - expire after <ms> milliseconds, unless ");
+      System.out.println("                                         KEEP_ALIVE is called repeatedly");
+      System.out.println("");
+      System.out.println("  SHOW_TIME                            - Return current time in ms");
+      System.out.println("");
+      System.out.println("  EXIT                                 - Terminate session");
+      System.out.println("  QUIT                                 - Terminate session");
+      System.out.println("  BYE                                  - Terminate session");
+      System.out.println("  FIN                                  - Terminate session");
+      System.out.println("  RINUNCIATO                           - Terminate session");
+    }
+    else if(s.startsWith("KEEP_ALIVE "))
+    {
+      String ka_str=s.substring(11,s.length()).trim();
+
+      try
+      {
+        long ka_long=Long.parseLong(ka_str);
+
+        if(ka_long>0)
+        {
+          expire_at=System.currentTimeMillis()+ka_long;
+          System.out.println("KEEP_ALIVE has been enabled - expire after "+ka_long+" milliseconds");
+        }
+        else
+        {
+          expire_at=0;
+          System.out.println("KEEP_ALIVE has been disabled");
+        }
+      }
+      catch(Exception e)
+      {
+        System.out.println("Error: Unable to parse KEEP_ALIVE value");
+      }
+    }
+    else if(s.length()>0)
+    {
+      System.err.println("Error: Unknown/malformed command \""+s+"\"");
+    }
+  }
+
+  void slp(int secs)
+  {
+    try
+    {
+      Thread.currentThread().sleep(secs*1000);
+    }
+    catch(Exception e)
+    {
+    }
+  }
+
+  void dq_task_complete_time(double t)
+  {
+    if(dqname.length()>0)
+    {
+      if(dqt.containsKey(dqname))
+      {
+        TibrvCmQueueTransport dq_trans=(TibrvCmQueueTransport)dqt.get(dqname);
+
+        try
+        {
+          dq_trans.setCompleteTime(t);
+          System.out.println("DQ task complete time for \""+dqname+"\" set to "+t);
+        }
+        catch(Exception e)
+        {
+          System.err.println("Error: Cannot set DQ task complete time for \""+dqname+"\"");
+          e.printStackTrace();
+        }
+      }
+      else
+      {
+        System.err.println("Error: DQ transport \""+dqname+"\" doesn't exist");
+      }
+    }
+    else
+    {
+      System.err.println("Error: DQ_TASK_COMPLETE_TIME: Not using DQ transport");
+    }
+  }
+
+  void create_inbox()
+  {
+    if(cmname.length()>0)
+    {
+      TibrvCmTransport dq_trans=(TibrvCmTransport)cmt.get(cmname);
+
+      try
+      {
+        System.out.println("Inbox for transport \""+cmname+"\" is \""+dq_trans.createInbox()+"\"");
+      }
+      catch(Exception e)
+      {
+        System.out.println("Error: CREATE_INBOX failed");
+        e.printStackTrace();
+      }
+    }
+    else
+    {
+      try
+      {
+        System.out.println("Inbox for RV transport is \""+transport.createInbox()+"\"");
+      }
+      catch(Exception e)
+      {
+        System.out.println("Error: CREATE_INBOX failed");
+        e.printStackTrace();
+      }
+    }
+  }
+
+  void setcmtime(String s)
+  {
+    if(cmname.length()>0)
+    {
+      TibrvCmTransport dq_trans=(TibrvCmTransport)cmt.get(cmname);
+
+      try
+      {
+        double n=Double.parseDouble(s);
+        dq_trans.setDefaultTimeLimit(n);
+        System.out.println("CM expiry time for transport \""+cmname+"\" set to "+n+" sec(s)");
+      }
+      catch(Exception e)
+      {
+        System.out.println("Error: SET_CM_TIME_LIMIT failed");
+        e.printStackTrace();
+      }
+    }
+    else
+    {
+      System.out.println("Error: CM transport not in use");
+    }
+  }
+
+  void reviewcml(String s)
+  {
+    if(cmname.length()>0)
+    {
+      TibrvCmTransport dq_trans=(TibrvCmTransport)cmt.get(cmname);
+
+      try
+      {
+        dq_trans.reviewLedger(this,s,null);
+      }
+      catch(Exception e)
+      {
+        System.out.println("Error: REVIEW_CM_LEDGER failed");
+        e.printStackTrace();
+      }
+    }
+    else
+    {
+      System.out.println("Error: CM transport not in use");
+    }
+  }
+
+  public boolean onLedgerMsg(TibrvCmTransport cmTransport,String subject,TibrvMsg msg,Object closure)
+  {
+    dump_msg(msg,"_RVSH.CM.LEDGER.REVIEW.CALLBACK",null);
+    return(false);
+  }
+
+  void use_dq(String s)
+  {
+    if(s.length()>0)
+    {
+      if(!dqt.containsKey(s))
+      {
+        TibrvCmQueueTransport dq_trans;
+
+        try
+        {
+          dq_trans=new TibrvCmQueueTransport(transport,s,dq_worker_weight,dq_worker_tasks,dq_scheduler_weight,dq_scheduler_heartbeat_int,dq_scheduler_activation_int);
+          dqt.put(s,dq_trans);
+          System.out.println("Created DQ transport \""+s+"\"");
+        }
+        catch (TibrvException e)
+        {
+          System.err.println("Error: Failed to create TibrvCmQueueTransport");
+          e.printStackTrace();
+        }
+      }
+
+      dqname=s;
+    }
+    else
+    {
+      System.err.println("Error: USE_DQ_TRANSPORT: No DQ name specified");
+    }
+  }
+
+  void init_ft(String s)
+  {
+    if(ftm==null && dq_scheduler_weight>0 && dq_scheduler_heartbeat_int>0 && dq_scheduler_activation_int>0)
+    {
+      try
+      {
+        System.out.println("Creating FT transport - "+s+" Weight:"+dq_scheduler_weight+" Heartbeat:"+dq_scheduler_heartbeat_int+" Activate:"+dq_scheduler_activation_int);
+        ftm=new TibrvFtMember(Tibrv.defaultQueue(),this,default_transport,s,dq_scheduler_weight,1,dq_scheduler_heartbeat_int,0,dq_scheduler_activation_int,null);
+      }
+      catch (TibrvException e)
+      {
+        System.err.println("Error: Failed to create FT transport");
+        e.printStackTrace();
+      }
+    }
+    else
+    {
+      System.err.println("Error: Failed to create FT transport - an FT transport has already been created (or scheduler & RV parameters must be specified first)");
+    }
+  }
+
+  void select_transport(String s)
+  {
+    if(s.length()>0)
+    {
+      if(s.equals("DEFAULT"))
+      {
+        transport=default_transport;
+        System.out.println("Selected RV transport \""+s+"\"");
+      }
+      else
+      {
+        if(!tsp.containsKey(s))
+        {
+          TibrvRvdTransport new_trans;
+
+          try
+          {
+            new_trans=new TibrvRvdTransport(service,network,daemon);
+            new_trans.setDescription(s);
+            tsp.put(s,new_trans);
+            transport=new_trans;
+            System.out.println("Created and selected new RV transport \""+s+"\"");
+          }
+          catch (TibrvException e)
+          {
+            System.err.println("Error: Failed to create TibrvRvdTransport");
+            e.printStackTrace();
+          }
+        }
+        else
+        {
+          transport=(TibrvRvdTransport)tsp.get(s);
+          System.out.println("Selected RV transport \""+s+"\"");
+        }
+      }
+    }
+    else
+    {
+      System.err.println("Error: SELECT_TRANSPORT: No transport name specified");
+    }
+  }
+
+  void use_cm(String s)
+  {
+    if(s.length()>0)
+    {
+      if(!cmt.containsKey(s))
+      {
+        TibrvCmTransport cm_trans;
+
+        try
+        {
+          cm_trans=new TibrvCmTransport(transport,s,true,cmledger,true);
+          cmt.put(s,cm_trans);
+          System.out.println("Created CM transport \""+s+"\"");
+        }
+        catch (TibrvException e)
+        {
+          System.err.println("Error: Failed to create TibrvCmTransport");
+          e.printStackTrace();
+        }
+      }
+
+      cmname=s;
+    }
+    else
+    {
+      System.err.println("Error: USE_CM_TRANSPORT: No CM name specified");
+    }
+  }
+
+  void close_dq(String s)
+  {
+    if(s.length()>0)
+    {
+      if(dqt.containsKey(s))
+      {
+        TibrvCmQueueTransport dq_trans=(TibrvCmQueueTransport)dqt.get(s);
+        dq_trans.destroy();
+        dq_trans=null;
+        dqt.remove(s);
+        System.out.println("Closed DQ transport \""+s+"\"");
+      }
+      else
+      {
+        System.err.println("Error: DQ transport \""+s+"\" doesn't exist");
+      }
+    }
+    else
+    {
+      System.err.println("Error: CLOSE_DQ_TRANSPORT: No DQ name specified");
+    }
+  }
+
+  void close_cm(String s)
+  {
+    if(s.length()>0)
+    {
+      if(cmt.containsKey(s))
+      {
+        TibrvCmTransport cm_trans=(TibrvCmTransport)cmt.get(s);
+        cm_trans.destroy();
+        cm_trans=null;
+        cmt.remove(s);
+        System.out.println("Closed CM transport \""+s+"\"");
+      }
+      else
+      {
+        System.err.println("Error: CM transport \""+s+"\" doesn't exist");
+      }
+    }
+    else
+    {
+      System.err.println("Error: CLOSE_DQ_TRANSPORT: No DQ name specified");
+    }
+  }
+
+  void clear_fields()
+  {
+    v_str.clear();
+    v_typ.clear();
+    v_ord.clear();
+    reply_to="";
+    field_c=0;
+    System.out.println("Publish fields cleared");
+  }
+
+  void show_fields()
+  {
+    if(v_ord.size()>0)
+    {
+      int l=((Integer)v_ord.lastKey()).intValue();
+
+      for(int c=0;c<=l;c++)
+      {
+        String et=(String)v_ord.get(new Integer(c));
+        System.out.println(""+et+" ("+TibrvMsg.getTypeName(((Short)v_typ.get(et)).shortValue())+") "+v_str.get(et));
+      }
+    }
+    else
+    {
+      System.out.println("No fields defined");
+    }
+  }
+
+  void storefield(String s,short type)
+  {
+    int c=0;
+    int t=0;
+    int f=0;
+    StringBuffer a=new StringBuffer();
+    StringBuffer b=new StringBuffer();
+    StringBuffer u=new StringBuffer();
+
+    if(s.length()>0)
+    {
+      for(c=0;c<s.length();c++)
+      {
+        if(s.charAt(c)==' ' && t==0)
+        {
+          t=1;
+        }
+        else if(t==0)
+        {
+          a.append(s.charAt(c));
+        }
+        else if(t==1)
+        {
+          b.append(s.charAt(c));
+        }
+      }
+
+      if(!v_str.containsKey(a.toString().trim()))
+      {
+        v_ord.put(new Integer(field_c),a.toString().trim());
+        field_c++;
+      }
+
+      if(type==TibrvMsg.STRING)
+      {
+        for(int cc=0;cc<b.length();cc++)
+        {
+          if(f==0)
+          {
+            if(cc<(b.length()-1))
+            {
+              if(b.charAt(cc)=='#' && b.charAt(cc+1)=='<')
+              {
+                u.append('\n');
+                f=1;
+              }
+              else
+              {
+                u.append(b.charAt(cc));
+              }
+            }
+            else
+            {
+              u.append(b.charAt(cc));
+            }
+          }
+          else
+          {
+            f=0;
+          }
+        }
+
+        v_str.put(a.toString().trim(),u.toString().trim());
+      }
+      else
+      {
+        v_str.put(a.toString().trim(),b.toString().trim());
+      }
+
+      v_typ.put(a.toString().trim(),new Short(type));
+    }
+  }
+
+  void list_subs()
+  {
+    Enumeration enux=listeners.keys();
+
+    while(enux.hasMoreElements())
+    {
+      System.out.println("Open subscription: "+(String)enux.nextElement());
+    }
+  }
+
+  void list_dqts()
+  {
+    Enumeration enux=dqt.keys();
+
+    while(enux.hasMoreElements())
+    {
+      System.out.println("Open DQ transport: "+(String)enux.nextElement());
+    }
+  }
+
+  void list_cmts()
+  {
+    Enumeration enux=cmt.keys();
+
+    while(enux.hasMoreElements())
+    {
+      System.out.println("Open CM transport: "+(String)enux.nextElement());
+    }
+  }
+
+  void publish_to(String s,int type)
+  {
+    Hashtable mh=new Hashtable();
+
+    if(s.length()>0)
+    {
+      try
+      {
+        TibrvMsg sm=new TibrvMsg();
+        sm.setSendSubject(s);
+
+        if(v_ord.size()>0)
+        {
+          int lastkey=((Integer)v_ord.lastKey()).intValue();
+
+          for(int lc=0;lc<=lastkey;lc++)
+          {
+            String et=(String)v_ord.get(new Integer(lc));
+
+            if(et.indexOf("%%")>-1)
+            {
+              StringTokenizer st=new StringTokenizer(et,"%%");
+              StringBuffer fid=new StringBuffer();
+              String del="";
+              String parent="root";
+
+              while(st.hasMoreTokens())
+              {
+                String x=st.nextToken();
+
+                if(st.countTokens()>0)
+                {
+                  fid.append(del+x);
+                  del="%%";
+
+                  if(!mh.containsKey(fid.toString()))
+                  {
+                    TibrvMsg tmp=new TibrvMsg();
+                    mh.put(fid.toString(),tmp);
+
+                    if(parent.compareTo("root")==0)
+                    {
+                      sm.add(x,tmp);
+                    }
+                    else
+                    {
+                      TibrvMsg pmsg=(TibrvMsg)mh.get(parent);
+                      pmsg.add(x,tmp);
+                    }
+                  }
+
+                  parent=fid.toString();
+                }
+                else
+                {
+                  TibrvMsg pmsg=(TibrvMsg)mh.get(parent);
+                  formfield(x,et,pmsg);
+                }
+              }
+            }
+            else
+            {
+              formfield(et,et,sm);
+            }
+          }
+        }
+
+        if(type==0)
+        {
+          if(reply_to.length()>0)
+          {
+            sm.setReplySubject(reply_to);
+            reply_to="";
+          }
+
+          if(cmname.length()>0)
+          {
+            TibrvCmTransport dq_trans=(TibrvCmTransport)cmt.get(cmname);
+            dq_trans.send(sm);
+            System.out.println("Published to \""+s+"\" on CM transport \""+cmname+"\"");
+          }
+          else
+          {
+            System.out.println("Published to \""+s+"\" on RV transport");
+            transport.send(sm);
+          }
+        }
+        else if(type==1)
+        {
+          TibrvMsg rm=transport.sendRequest(sm,timeout);
+
+          if(rm==null)
+          {
+            System.out.println("INFO: Request to "+s+" timed out");
+          }
+          else
+          {
+            dump_msg(rm,"",null);
+          }
+        }
+      }
+      catch(Exception e)
+      {
+        System.err.println("Error: Publish failed");
+        e.printStackTrace();
+      }
+    }
+    else
+    {
+      System.err.println("Error: PUBLISH_TO/REQUEST_TO: No subject name specified");
+    }
+  }
+
+  void formfield(String fn,String s,TibrvMsg m)
+  {
+    try
+    {
+      if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.BOOL)
+      {
+        m.add(fn,new Boolean((String)v_str.get(s)),TibrvMsg.BOOL);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.I8)
+      {
+        m.add(fn,new Byte((String)v_str.get(s)),TibrvMsg.I8);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.I16)
+      {
+        m.add(fn,new Integer((String)v_str.get(s)),TibrvMsg.I16);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.I32)
+      {
+        m.add(fn,new Integer((String)v_str.get(s)),TibrvMsg.I32);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.I64)
+      {
+        m.add(fn,new Long((String)v_str.get(s)),TibrvMsg.I64);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.U8)
+      {
+        m.add(fn,new Byte((String)v_str.get(s)),TibrvMsg.U8);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.U16)
+      {
+        m.add(fn,new Short((String)v_str.get(s)),TibrvMsg.U16);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.U32)
+      {
+        m.add(fn,new Integer((String)v_str.get(s)),TibrvMsg.U32);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.U64)
+      {
+        m.add(fn,new Long((String)v_str.get(s)),TibrvMsg.U64);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.F32)
+      {
+        m.add(fn,new Float((String)v_str.get(s)),TibrvMsg.F32);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.F64)
+      {
+        m.add(fn,new Double((String)v_str.get(s)),TibrvMsg.F64);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.STRING)
+      {
+        m.add(fn,new String((String)v_str.get(s)),TibrvMsg.STRING);
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.DATETIME)
+      {
+        if(((String)v_str.get(s)).equals("NOW"))
+        {
+          m.add(fn,new Date(System.currentTimeMillis()),TibrvMsg.DATETIME);
+        }
+        else
+        {
+          m.add(fn,new Date(Long.parseLong((String)v_str.get(s))),TibrvMsg.DATETIME);
+        }
+      }
+      else if(((Short)v_typ.get(s)).shortValue()==TibrvMsg.OPAQUE)
+      {
+        byte[] opaq=makeToken((String)v_str.get(s));
+        m.add(fn,opaq,TibrvMsg.OPAQUE);
+      }
+    }
+    catch(Exception e)
+    {
+      System.out.println("Error: Failed to create field \""+s+"\" (inappropriate value for field type ?)");
+      e.printStackTrace();
+    }
+  }
+
+  void subscribe_to(String s)
+  {
+    if(s.length()>0)
+    {
+      if(!listeners.containsKey(s))
+      {
+        if(dqname.length()>0)
+        {
+          if(dqt.containsKey(dqname))
+          {
+            try
+            {
+              TibrvListener tib=new TibrvListener(Tibrv.defaultQueue(),this,(TibrvCmQueueTransport)dqt.get(dqname),s,null);
+              listeners.put(s,tib);
+              System.out.println("Subscribed to \""+s+"\" on DQ transport \""+dqname+"\"");
+            }
+            catch (TibrvException e)
+            {
+              System.err.println("Error: Failed to create listener");
+              e.printStackTrace();
+            }
+          }
+          else
+          {
+            System.err.println("Error: DQ transport "+dqname+" doesn't exist");
+          }
+        }
+        else
+        {
+          try
+          {
+            TibrvListener tib=new TibrvListener(Tibrv.defaultQueue(),this,transport,s,null);
+            listeners.put(s,tib);
+            System.out.println("Subscribed to \""+s+"\" on RV transport");
+          }
+          catch (TibrvException e)
+          {
+            System.err.println("Error: Failed to create listener");
+            e.printStackTrace();
+          }
+        }
+      }
+    }
+    else
+    {
+      System.err.println("Error: SUBSCRIBE_TO: No subject name specified");
+    }
+  }
+
+  void cancel(String s)
+  {
+    if(s.length()>0)
+    {
+      if(listeners.containsKey(s))
+      {
+        TibrvListener tib=(TibrvListener)listeners.get(s);
+        tib.destroy();
+        tib=null;
+        listeners.remove(s);
+        System.out.println("Cancelled subscription to \""+s+"\"");
+      }
+    }
+    else
+    {
+      System.err.println("Error: CANCEL_SUBSCRIPTION: No subject name specified");
+    }
+  }
+
+  public void run()
+  {
+    int c;
+    StringBuffer s=new StringBuffer("");
+
+    try
+    {
+      while((c=is.read())>0)
+      {
+        if(c>=32)
+        {
+          s.append((char)c);
+        }
+        else if(c==10)
+        {
+          cmd(s.toString());
+          s.setLength(0);
+        }
+        else if(c==-1)
+        {
+          System.err.println("Warning: Controlling process has disconnected, closing down");
+//        slp(5);
+          System.exit(0);
+        }
+      }
+    }
+    catch(Exception e)
+    {
+      System.err.println("Error: Can't tell you what the error actually is, maybe the stack trace below will help");
+      e.printStackTrace();
+    }
+  }
+
+  public void onMsg(TibrvListener listener,TibrvMsg msg)
+  {
+    dump_msg(msg,"",listener);
+  }
+
+  public void onFtAction(TibrvFtMember member,String groupName,int action)
+  {
+    if(action==TibrvFtMember.ACTIVATE)
+    {
+      System.out.println("FT_ACTIVATE");
+    }
+    else if(action==TibrvFtMember.DEACTIVATE)
+    {
+      System.out.println("FT_DEACTIVATE");
+    }
+  }
+
+  synchronized void dump_msg(TibrvMsg msg,String su,TibrvListener listener)
+  {
+    String tdesc="NULL";
+
+    if(listener!=null)
+    {
+      tdesc=listener.getTransport().getDescription();
+    }
+
+    msg_size=0;
+    System.out.println("UPDATE_START");
+    System.out.println("TRANSPORT "+tdesc);
+    System.out.println("TIME "+System.currentTimeMillis());
+
+    if(su.length()>0)
+    {
+      System.out.println("SENT_TO "+su);
+    }
+    else
+    {
+      System.out.println("SENT_TO "+msg.getSendSubject());
+    }
+
+    if(msg.getReplySubject()!=null)
+    {
+      System.out.println("REPLY_TO "+msg.getReplySubject());
+    }
+
+    fdump(msg,"");
+    System.out.println("MSG_SIZE "+msg_size);
+    System.out.println("UPDATE_END");
+  }
+
+  void fdump(TibrvMsg msg,String indent)
+  {
+    int i;
+    String[] dig = {"0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"};
+
+    for(i=0;i<msg.getNumFields();i++)
+    {
+      try
+      {
+        TibrvMsgField field=msg.getFieldByIndex(i);
+
+        if(field.type==TibrvMsg.MSG)
+        {
+          fdump((TibrvMsg)field.data,indent+field.name+field_separator);
+        }
+        else
+        {
+          String tt=TibrvMsg.getTypeName(field.type);
+
+          if(field.type==TibrvMsg.OPAQUE)
+          {
+            byte[] b=(byte[])field.data;
+            StringBuffer tst;
+
+            if(display_format==1)
+            {
+              tst=new StringBuffer(tt+"_FIELD "+indent+field.name);
+            }
+            else
+            {
+              tst=new StringBuffer("F "+indent+field.name+" "+tt);
+            }
+
+            for(int cc=0;cc<b.length;cc++)
+            {
+              tst.append(" "+dig[((b[cc] & 0xff)>>4)]+dig[(b[cc] & 0xf)]);
+            }
+
+            System.out.println(tst.toString());
+            msg_size+=(tst.toString()).length();
+          }
+          else
+          {
+            msg_size+=((field.data).toString()).length();
+
+            if(display_format==1)
+            {
+              System.out.println(tt+"_FIELD "+indent+field.name+" "+field.data);
+            }
+            else
+            {
+              System.out.println("F "+indent+field.name+" "+tt+" "+field.data);
+            }
+          }
+        }
+      }
+      catch(TibrvException e)
+      {
+        System.err.println("Error: Exception decoding field");
+        e.printStackTrace();
+      }
+    }
+
+    System.out.flush();
+  }
+
+  byte[] makeToken(String s)
+  {
+    StringTokenizer t=new StringTokenizer(s);
+    int sz=t.countTokens();
+    byte[] xet=new byte[sz];
+
+    for(int y=0;y<sz;y++)
+    {
+      String ttk=t.nextToken();
+      int av=Integer.parseInt(ttk,16);
+
+      if(av>=0x80)
+      {
+        int remove_sign=0x80-(av-0x80);
+        xet[y]=(byte)-remove_sign;
+      }
+      else
+      {
+        xet[y]=Byte.parseByte(ttk,16);
+      }
+    }
+
+    return(xet);
+  }
+
+
+
+
+
+public class rvshell {
+
+	public static void main(String[] args) {
+		// TODO Auto-generated method stub
+		new rvsh(args);
+	}
+
+}
